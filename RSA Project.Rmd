@@ -1,0 +1,623 @@
+---
+title: 'Rasch Rating Scale Analysis: Passion for Profession Scale'
+author: "Adenigbagbe Abosede Precious-Gold"
+date: "March 28, 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    highlight: tango
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo    = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = "center",
+  fig.width  = 8,
+  fig.height = 6
+)
+options("scipen" = 100, "digits" = 2)
+```
+
+
+```{r load-libraries, include=FALSE}
+library(TAM)
+library(psych)
+library(readxl)
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+library(WrightMap)
+```
+
+
+# Data Description and Preparation
+
+The Passion for Profession scale comprises 10 items measuring undergraduate students' engagement with and enthusiasm for their chosen field of study. Responses were recorded on a 6-point Likert-type format ranging from 1 (*Strongly Disagree*) to 6 (*Strongly Agree*). Before analysis, two preprocessing steps were required.
+
+First, item profes10 ("If I had the opportunity, I would choose a different profession.") is the only negatively worded item in the scale. A high score on this item reflects *low* passion — the opposite direction of all other items. If left uncorrected, profes10 would correlate negatively with the rest of the scale and distort all subsequent analyses. It was therefore reverse coded prior to any analysis using the formula: new score = 7 − original score, so that higher scores consistently reflect greater passion across all items.
+
+Second, extreme scorers — respondents who selected the minimum or maximum response on every item — were identified and removed, as such patterns carry no psychometric information in Rasch modelling (Bond & Fox, 2015).
+
+```{r load-data}
+# Load data — place Passion.xlsx in the same folder as this .Rmd file
+data_raw  <- read_excel("Passion.xlsx", sheet = "base")
+codebook  <- read_excel("Passion.xlsx", sheet = "codebook", col_names = FALSE)
+items_raw <- data_raw %>% select(starts_with("profes"))
+```
+
+```{r reverse-code}
+items_raw$profes10 <- 7 - items_raw$profes10
+```
+
+```{r check-extremes}
+extreme_idx <- which(
+  apply(items_raw, 1, function(x) all(x == 1)) |
+  apply(items_raw, 1, function(x) all(x == 6))
+)
+```
+
+
+```{r remove-extremes}
+items_clean <- if (length(extreme_idx) > 0) {
+  items_raw[-extreme_idx, ]
+} else {
+  items_raw
+}
+
+results <- data.frame(
+  Metric = c("Extreme scorers identified", "Participants removed", "Final analytic sample"),
+  Value = c(length(extreme_idx), length(extreme_idx), nrow(items_clean))
+)
+
+kable(results, caption = "Extreme Scorer Screening Summary") %>%
+  kable_styling(full_width = FALSE, position = "center")
+```
+
+```{r convert-0based}
+# TAM requires 0-based responses
+items_0 <- items_clean - 1
+```
+
+```{r descriptives-table}
+item_labels <- c(
+  "I am interested in what I do within my profession.",
+  "What attracts me to my profession is the opportunity to learn something new.",
+  "With each month, I feel my professional knowledge growing.",
+  "I like the people who work in my profession.",
+  "I believe that my future job has an important purpose and meaning.",
+  "I feel enthusiastic about my profession.",
+  "I feel proud when I talk about what I am studying.",
+  "I believe that my profession is important for society.",
+  "I believe that working in my profession is prestigious.",
+  "If I had the opportunity, I would choose a different profession. [R]"
+)
+
+desc <- describe(items_clean)[, c("n", "mean", "sd", "min", "max", "skew", "kurtosis")]
+desc <- round(desc, 3)
+desc_table <- cbind(Item = item_labels, desc)
+
+kable(desc_table,
+      caption = "Table 1. Descriptive Statistics for Scale Items (N = 244)",
+      row.names = TRUE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE, font_size = 11)
+```
+
+```{r response-frequencies}
+freq_table <- sapply(items_clean, function(x) table(factor(x, levels = 1:6)))
+freq_df    <- as.data.frame(t(freq_table))
+colnames(freq_df) <- c("Strongly Disagree (1)", "Disagree (2)", "Rather Disagree (3)",
+                        "Rather Agree (4)", "Agree (5)", "Strongly Agree (6)")
+rownames(freq_df) <- colnames(items_clean)
+
+kable(freq_df,
+      caption = "Table 2. Response Frequency per Category") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = TRUE, font_size = 11)
+```
+
+The final analytic sample comprised **N = `r nrow(items_clean)` participants** after one extreme scorer was identified and removed. No missing data were detected. Item means ranged from *M* = 3.60 (*SD* = 1.08; profes03) to *M* = 4.30 (*SD* = 0.99; profes08), indicating that respondents generally leaned toward agreement. All items demonstrated mild negative skew, reflecting a ceiling tendency. A critical observation is that response category 6 (*Strongly Agree*) was endorsed by only **one respondent per item** across the entire scale (two for profes10). This near-zero endorsement rate violates the minimum threshold of 10 observations per category required for stable Rasch estimation (Linacre, 2002) and will be formally addressed in the optimization stage.
+
+
+# Reliability and Descriptives
+
+Reliability was assessed using two complementary indices. **Cronbach's alpha** provides a classical test theory estimate of internal consistency. **EAP Person Reliability** is a Rasch-specific index reflecting the precision with which the scale separates respondents along the latent continuum. Both are interpreted against the benchmark of $>= .70$ (acceptable) and $>= .80$ (good; Kline, 2000).
+
+```{r classical-reliability, warning=FALSE, results='hide'}
+rel <- psych::alpha(items_clean, check.keys = FALSE)
+cat("Cronbach's Alpha:", round(rel$total$raw_alpha, 3), "\n")
+```
+
+```{r fit-initial-rsm, results='hide'}
+fit_RSM <- tam.mml(resp = items_0, irtmodel = "RSM", verbose = FALSE)
+cat("EAP Reliability:", round(fit_RSM$EAP.rel, 3), "\n")
+```
+
+```{r person-ability, include=FALSE, results='hide'}
+invisible(capture.output(
+  person_ability <- tam.wle(fit_RSM)
+))
+```
+
+```{r person-separation-reliability, results='hide'}
+cat("Person Separation Reliability (WLE):", round(person_ability$WLE.rel[[1]], 3), "\n")
+```
+
+```{r reliability-table}
+rel_df <- data.frame(
+  Statistic = c("Cronbach's Alpha (Classical Test Theory)",
+                "EAP Person Reliability (Rasch)",
+                "Person Separation Reliability (WLE)"),
+  Value     = c(round(rel$total$raw_alpha[[1]], 3),
+                round(fit_RSM$EAP.rel[[1]], 3),
+                round(person_ability$WLE.rel[[1]], 3)),
+  Benchmark = c(">= .70 acceptable >= .80 good",
+                ">= .70 acceptable >= .80 good",
+                ">= .70 acceptable >= .80 good")
+)
+
+kable(rel_df, caption = "Table 3. Reliability Indices — Initial Model") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE, font_size = 12)
+```
+
+```{r point-measure}
+kable(rel[["item.stats"]][, c("raw.r", "r.drop")],
+      caption = "Table 4. Item Discrimination: Point-Measure Correlations",
+      col.names = c("raw.r", "r.drop"),
+      digits = 3) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE, font_size = 12)
+```
+
+Cronbach's alpha was alpha = `r round(rel$total$raw_alpha, 3)`, indicating good internal consistency. EAP Person Reliability was `r round(fit_RSM$EAP.rel, 3)`, confirming the scale's capacity to reliably differentiate respondents along the latent continuum of passion for profession. Both indices exceed the $>= .80$ threshold. Person separation reliability *(WLE)* was `r round(person_ability$WLE.rel[[1]], 3)`, consistent with the EAP estimate, confirming the scale's capacity to reliably differentiate respondents. All items demonstrated adequate discrimination, with corrected item-total correlations (*r*-drop) ranging from .56 (profes10) to $.80$ **(profes02)**, all exceeding the minimum threshold of $.30$. The comparatively lower discrimination of **profes10** (*r*-drop = .56) is consistent with its reverse-coded nature and will be examined further in the fit analysis.
+
+
+# Dimensionality
+
+The Rasch Rating Scale Model assumes **unidimensionality** — that a single latent trait underlies all item responses. This was assessed via principal components analysis (PCA) of Rasch residuals. After the primary Rasch dimension is extracted, remaining residuals should contain no further systematic variance if the scale is truly unidimensional. The key criterion is that the eigenvalue of the first residual component should fall below **2.0** — equivalent to less than two items' worth of unexplained systematic variance (Linacre, 1998).
+
+```{r pca-residuals}
+res        <- IRT.residuals(fit_RSM)
+res_matrix <- res$stand_residuals
+
+scree(res_matrix, factors = FALSE, pc = TRUE,
+      main = "Figure 1. Scree Plot of Rasch Residuals — Initial Model")
+abline(h = 2, col = "red", lty = 2)
+```
+
+```{r pca-results, include=FALSE}
+pca_res <- pca(res_matrix, nfactors = 1, rotate = "none", scores = FALSE)
+```
+
+```{r eigenvalue-table}
+eig_vals <- pca_res$values
+eig_df   <- data.frame(
+  Component          = paste0("PC", 1:length(eig_vals)),
+  Eigenvalue         = round(eig_vals, 3),
+  Variance_Explained = paste0(round(eig_vals / sum(eig_vals) * 100, 2), "%")
+)
+
+kable(head(eig_df, 10),
+      caption = "Table 5. Eigenvalues of PCA on Rasch Residuals — Initial Model (First 10 Components)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE, font_size = 12)
+```
+
+The eigenvalue of the first residual contrast was `r round(pca_res$values[1], 3)`, falling below the unidimensionality threshold of 2.0, which supports the assumption of unidimensionality. Subsequent components also declined substantially (PC2 = `r round(pca_res$values[2], 3)`, PC3 = `r round(pca_res$values[3], 3)`), and no clearly interpretable secondary dimension was identified. The scale is therefore considered **unidimensional**, and the Rasch Rating Scale Model is an appropriate analytical framework for this data.
+
+
+# Model Fit
+
+Item fit in Rasch modelling is evaluated using **Infit** and **Outfit Mean Square (MnSq)** statistics and their *Z*-standardized (*ZSt*) equivalents. Infit is sensitive to unexpected responses near an item's difficulty level; Outfit is more sensitive to outlier responses far from item difficulty. For a rating scale survey, acceptable MnSq values fall between **0.6 and 1.4**, with *ZSt* within **+/-2.0** (Wright & Linacre, 1994). Values above 1.4 indicate **underfit** — the item behaves more randomly than expected. Values below 0.6 indicate **overfit** — responses are overly deterministic and the item may be redundant.
+
+```{r fit-table}
+fit_stats <- msq.itemfit(fit_RSM)
+
+fit_df <- data.frame(
+  Item        = colnames(items_0),
+  Infit_MnSq  = round(fit_stats$itemfit$Infit, 3),
+  Infit_ZSt   = round(fit_stats$itemfit$Infit_t, 3),
+  Outfit_MnSq = round(fit_stats$itemfit$Outfit, 3),
+  Outfit_ZSt  = round(fit_stats$itemfit$Outfit_t, 3),
+  Infit_Flag  = ifelse(fit_stats$itemfit$Infit  < 0.6 | fit_stats$itemfit$Infit  > 1.4 |
+                       abs(fit_stats$itemfit$Infit_t)  > 2, "misfit", "ok"),
+  Outfit_Flag = ifelse(fit_stats$itemfit$Outfit < 0.6 | fit_stats$itemfit$Outfit > 1.4 |
+                       abs(fit_stats$itemfit$Outfit_t) > 2, "misfit", "ok")
+)
+
+kable(fit_df,
+      caption = "Table 6. Item Fit Statistics — Initial Model (Acceptable: MnSq 0.6-1.4, |ZSt| < 2.0)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 11)
+```
+
+Item fit statistics revealed acceptable performance for the majority of items, with two notable exceptions. **profes10** demonstrated severe underfit $(Infit\ MnSq = 1.52,\ ZSt = 4.78;\ Outfit\ MnSq = 1.90,\ ZSt = 6.46)$, indicating responses considerably more random than the model expects — consistent with its reverse-coded nature and lowest point-measure correlation (*r*-drop = .56). **profes02** showed overfit (*Infit MnSq* = 0.65, *ZSt* = -4.22; *Outfit MnSq* = 0.66, *ZSt* = -3.50), suggesting overly predictable responses and possible item redundancy. **profes08** showed a borderline Infit *ZSt* = 2.01, which is statistically flagged; however, its MnSq of 1.21 remains well within the acceptable 0.6–1.4 range. Because ZSt is sensitive to sample size and MnSq is considered the primary substantive criterion (Wright & Linacre, 1994), profes08 is not flagged for removal at this stage but will be monitored across subsequent iterations. All remaining seven items demonstrated adequate fit. **profes10** is the primary candidate for removal in the optimization stage.
+
+
+# Item Continuum and Thresholds
+
+The **Wright Map** places both person abilities and item difficulty parameters on the same logit scale, enabling direct assessment of scale targeting. Adequate targeting occurs when item thresholds span the full range of person abilities. **Category Probability Curves** display the probability of choosing each response category across the latent trait — well-functioning categories show non-overlapping, ordered curves with distinct modal peaks. **Disordered thresholds** occur when a category is never the most probable response at any point on the scale. Threshold distances between adjacent categories should exceed **0.8 logits** and remain below **5.0 logits** (Linacre, 2002).
+
+```{r wright-map, fig.height=8, results='hide'}
+IRT.WrightMap(fit_RSM,
+              show.thr.lab = TRUE,
+              main         = "Figure 2. Item-Person Map (Wright Map) — Initial Model")
+```
+
+```{r category-curves, fig.height=8, results='hide'}
+plot(fit_RSM,
+     type   = "items",
+     export = FALSE,
+     high   = 5)
+```
+
+
+```{r threshold-table}
+rsm_par   <- fit_RSM[["item_irt"]]
+thresh_df <- rsm_par %>% select(-item) %>% round(3)
+rownames(thresh_df) <- rsm_par$item
+
+kable(thresh_df,
+      caption = "Table 7. Item IRT Parameters and Threshold Locations — Initial Model") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 12)
+```
+
+The Item-Person Map indicated **adequate targeting**, with person abilities concentrating between -2 and +4 logits and item thresholds spanning a comparable range. profes08 (*β* = -0.79) and profes05 (*β* = -0.37) were the easiest items to endorse; profes01 (*β* = 0.36) and profes03 (*β* = 0.57) were the most difficult. Critically, category 5 thresholds (*Strongly Agree*) were located between 6 and 8 logits — far above the bulk of the person distribution — confirming that this category was unreachable for most respondents and providing strong empirical justification for its collapse. The Category Probability Curves confirmed category malfunction: the curve for category 5 never achieved modal probability for any realistic level of the latent trait, indicating **disordered thresholds** requiring recoding.
+
+
+# Scale Optimization
+
+**Goal:** Achieve ordered thresholds, adequate threshold distances (> 0.8, < 5.0 logits), sufficient category frequencies (>= 10 per category), and acceptable item fit (MnSq 0.6-1.4) through a systematic iterative process.
+
+The optimization followed guidelines by Smith et al. (2003): categories with fewer than 10 observations should be collapsed with adjacent categories; misfitting items should be removed one at a time with diagnostics re-evaluated after each change.
+
+
+## Iteration 1: Collapse Top Response Category
+
+**Rationale:** Response category 6 (*Strongly Agree*, coded as 5 in the 0-based scale) was endorsed by only 1-2 respondents per item. This violates the minimum threshold of 10 observations per category (Linacre, 2002) and produces unrealistically high threshold locations (6-8 logits). Categories 4 and 5 (original 5 and 6) were collapsed into a single category, reducing the scale from 6-point to **5-point (0-4)**.
+
+```{r iter1-recode, results='hide'}
+df2        <- items_0
+df2[df2 == 5] <- 4
+
+cat("Category frequencies after collapsing:\n")
+print(table(as.matrix(df2)))
+```
+
+```{r iter1-model, results='hide'}
+fit_RSM2 <- tam.mml(resp = df2, irtmodel = "RSM", verbose = FALSE)
+cat("EAP Reliability (Iteration 1):", round(fit_RSM2$EAP.rel, 3), "\n")
+```
+
+```{r iter1-person-ability, include=FALSE}
+invisible(capture.output(
+  person_ability2 <- tam.wle(fit_RSM2)
+))
+```
+
+```{r iter1-alpha, warning=FALSE, results='hide'}
+rel2 <- psych::alpha(df2 + 1, check.keys = FALSE)
+cat("Cronbach's Alpha (Iteration 1):", round(rel2$total$raw_alpha, 3), "\n")
+```
+
+```{r iter1-pca, include=FALSE}
+# PCA of residuals for Iteration 1 — needed for optimization summary table
+res2        <- IRT.residuals(fit_RSM2)
+res_matrix2 <- res2$stand_residuals
+pca_res2    <- pca(res_matrix2, nfactors = 1, rotate = "none", scores = FALSE)
+```
+
+```{r iter1-fit}
+fit_stats2 <- msq.itemfit(fit_RSM2)
+
+fit_df2 <- data.frame(
+  Item        = colnames(df2),
+  Infit_MnSq  = round(fit_stats2$itemfit$Infit, 3),
+  Infit_ZSt   = round(fit_stats2$itemfit$Infit_t, 3),
+  Outfit_MnSq = round(fit_stats2$itemfit$Outfit, 3),
+  Outfit_ZSt  = round(fit_stats2$itemfit$Outfit_t, 3),
+  Infit_Flag  = ifelse(fit_stats2$itemfit$Infit  < 0.6 | fit_stats2$itemfit$Infit  > 1.4 |
+                       abs(fit_stats2$itemfit$Infit_t)  > 2, "misfit", "ok"),
+  Outfit_Flag = ifelse(fit_stats2$itemfit$Outfit < 0.6 | fit_stats2$itemfit$Outfit > 1.4 |
+                       abs(fit_stats2$itemfit$Outfit_t) > 2, "misfit", "ok")
+)
+
+kable(fit_df2,
+      caption = "Table 8. Item Fit — Iteration 1 (5-Point Scale, 0-4)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 11)
+```
+
+```{r iter1-thresholds}
+rsm_par2   <- fit_RSM2[["item_irt"]]
+thresh_df2 <- rsm_par2 %>% select(-item) %>% round(3)
+rownames(thresh_df2) <- rsm_par2$item
+
+kable(thresh_df2,
+      caption = "Table 9. Threshold Locations — Iteration 1") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 12)
+```
+
+```{r iter1-curves, fig.height=8, results='hide'}
+plot(fit_RSM2,
+     type   = "items",
+     export = FALSE,
+     high   = 4)
+```
+
+Following the collapse, all remaining categories achieved sufficient observation frequencies. Category probability curves showed improved ordering. **profes10** continued to show severe misfit (Infit MnSq = `r round(fit_df2$Infit_MnSq[fit_df2$Item == "profes10"], 2)`, ZSt = `r round(fit_df2$Infit_ZSt[fit_df2$Item == "profes10"], 2)`; Outfit MnSq = `r round(fit_df2$Outfit_MnSq[fit_df2$Item == "profes10"], 2)`, ZSt = `r round(fit_df2$Outfit_ZSt[fit_df2$Item == "profes10"], 2)`), indicating that its problems are structural — attributable to its reverse-coded nature — and not resolved by category recoding. Removal was therefore indicated. **profes08** continued to show a borderline Infit ZSt = `r round(fit_df2$Infit_ZSt[fit_df2$Item == "profes08"], 2)`, with MnSq = `r round(fit_df2$Infit_MnSq[fit_df2$Item == "profes08"], 2)` still within acceptable limits; it was therefore retained pending re-evaluation after item removal. **profes02** remained overfitting (Infit MnSq = `r round(fit_df2$Infit_MnSq[fit_df2$Item == "profes02"], 2)`), which is noted but does not warrant removal as overfit reflects redundancy rather than measurement distortion.
+
+
+## Iteration 2: Remove Misfitting Item
+
+```{r iter2-model, results='hide'}
+# Drop the item with the worst Outfit MnSq (most severe underfitting by primary criterion)
+worst_item <- fit_df2 %>%
+  filter(Outfit_MnSq == max(Outfit_MnSq)) %>%
+  pull(Item)
+
+cat("Dropping item:", worst_item, "\n")
+
+df3 <- df2 %>% select(-all_of(worst_item))
+
+fit_RSM3 <- tam.mml(resp = df3, irtmodel = "RSM", verbose = FALSE)
+cat("EAP Reliability (Iteration 2):", round(fit_RSM3$EAP.rel, 3), "\n")
+
+invisible(capture.output(
+  person_ability3 <- tam.wle(fit_RSM3)
+))
+
+rel3 <- psych::alpha(df3 + 1, check.keys = FALSE)
+cat("Cronbach's Alpha (Iteration 2):", round(rel3$total$raw_alpha, 3), "\n")
+
+fit_stats3 <- msq.itemfit(fit_RSM3)
+
+fit_df3 <- data.frame(
+  Item        = colnames(df3),
+  Infit_MnSq  = round(fit_stats3$itemfit$Infit, 3),
+  Infit_ZSt   = round(fit_stats3$itemfit$Infit_t, 3),
+  Outfit_MnSq = round(fit_stats3$itemfit$Outfit, 3),
+  Outfit_ZSt  = round(fit_stats3$itemfit$Outfit_t, 3),
+  Infit_Flag  = ifelse(fit_stats3$itemfit$Infit  < 0.6 | fit_stats3$itemfit$Infit  > 1.4 |
+                       abs(fit_stats3$itemfit$Infit_t)  > 2, "misfit", "ok"),
+  Outfit_Flag = ifelse(fit_stats3$itemfit$Outfit < 0.6 | fit_stats3$itemfit$Outfit > 1.4 |
+                       abs(fit_stats3$itemfit$Outfit_t) > 2, "misfit", "ok")
+)
+
+rsm_par3   <- fit_RSM3[["item_irt"]]
+thresh_df3 <- rsm_par3 %>% select(-item) %>% round(3)
+rownames(thresh_df3) <- rsm_par3$item
+
+final_fit     <- fit_RSM3
+final_df      <- df3
+final_rel     <- rel3
+final_stats   <- fit_stats3
+final_par     <- rsm_par3
+items_dropped <- worst_item
+```
+
+```{r iter2-pca, include=FALSE}
+# PCA of residuals for the final model
+res3        <- IRT.residuals(fit_RSM3)
+res_matrix3 <- res3$stand_residuals
+pca_res3    <- pca(res_matrix3, nfactors = 1, rotate = "none", scores = FALSE)
+```
+
+```{r iter2-fit-table}
+kable(fit_df3,
+      caption = "Table 10. Item Fit — Iteration 2 (After Item Removal)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 11)
+```
+
+```{r iter2-threshold-table}
+kable(thresh_df3,
+      caption = "Table 11. Threshold Locations — Iteration 2") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"),
+                full_width = FALSE, font_size = 12)
+```
+
+```{r iter2-curves, fig.height=8, results='hide'}
+plot(fit_RSM3,
+     type   = "items",
+     export = FALSE)
+```
+
+Following the removal of profes10, re-estimation of the model on the remaining nine items yielded substantially improved fit. All items with Outfit $MnSq > 1.4$ were resolved. **profes02** continued to show overfit $(Infit\ MnSq = 0.69,\ ZSt = -3.57;\ Outfit\ MnSq = 0.71,\ ZSt = -2.22)$, indicating overly predictable responses. However, overfit items — unlike underfitting items — do not introduce random noise or distort the latent scale; they are redundant rather than harmful (Wright & Linacre, 1994). Removal was therefore not warranted, and profes02 was retained in the final scale. Regarding **profes08**, its Infit ZSt = `r round(fit_df3$Infit_ZSt[fit_df3$Item == "profes08"], 2)` remains borderline, but its Infit MnSq = `r round(fit_df3$Infit_MnSq[fit_df3$Item == "profes08"], 2)` and Outfit MnSq = `r round(fit_df3$Outfit_MnSq[fit_df3$Item == "profes08"], 2)` are both within acceptable bounds. Given that MnSq is the primary fit criterion and ZSt is known to be inflated with larger samples, profes08 is retained in the final scale. This decision should be revisited in future research with independent samples.
+
+
+## Optimization Summary
+
+The table below summarises all key Rasch diagnostics across the three modelling stages, following the template recommended by Boone and Noltemeyer (2017).
+
+```{r final-person-ability, include=FALSE, results='hide'}
+invisible(capture.output(
+  final_person_ability <- tam.wle(final_fit)
+))
+```
+
+```{r optimization-summary}
+diag_col <- c(
+  "Number of items",
+  "Number of response categories",
+  "Cronbach's Alpha",
+  "EAP Person Reliability",
+  "Person Separation Reliability (WLE)",
+  "Eigenvalue of 1st contrast",
+  "Thresholds ordered",
+  "Category observations >= 10",
+  "Items with Outfit MnSq > 1.4",
+  "Items with Infit MnSq > 1.4",
+  "Items with Infit MnSq < 0.6 (overfit)",
+  "Items dropped"
+)
+
+init_col <- c(
+  "10",
+  "6",
+  format(round(rel$total$raw_alpha[[1]], 3), nsmall = 3),
+  format(round(fit_RSM$EAP.rel[[1]], 3), nsmall = 3),
+  format(round(person_ability$WLE.rel[[1]], 3), nsmall = 3),
+  format(round(pca_res$values[[1]], 3), nsmall = 3),
+  "No (disordered)",
+  "No (cat. 6: n = 1 per item)",
+  as.character(sum(fit_stats$itemfit$Outfit > 1.4)),
+  as.character(sum(fit_stats$itemfit$Infit  > 1.4)),
+  as.character(sum(fit_stats$itemfit$Infit  < 0.6)),
+  "—"
+)
+
+iter1_col <- c(
+  "10",
+  "5",
+  format(round(rel2$total$raw_alpha[[1]], 3), nsmall = 3),
+  format(round(fit_RSM2$EAP.rel[[1]], 3), nsmall = 3),
+  format(round(person_ability2$WLE.rel[[1]], 3), nsmall = 3),
+  format(round(pca_res2$values[[1]], 3), nsmall = 3),
+  "Yes",
+  "Yes",
+  as.character(sum(fit_stats2$itemfit$Outfit > 1.4)),
+  as.character(sum(fit_stats2$itemfit$Infit  > 1.4)),
+  as.character(sum(fit_stats2$itemfit$Infit  < 0.6)),
+  "—"
+)
+
+best_col <- c(
+  as.character(ncol(final_df)),
+  "5",
+  format(round(final_rel$total$raw_alpha[[1]], 3), nsmall = 3),
+  format(round(final_fit$EAP.rel[[1]], 3), nsmall = 3),
+  format(round(final_person_ability$WLE.rel[[1]], 3), nsmall = 3),
+  format(round(pca_res3$values[[1]], 3), nsmall = 3),
+  "Yes",
+  "Yes",
+  as.character(sum(final_stats$itemfit$Outfit > 1.4)),
+  as.character(sum(final_stats$itemfit$Infit  > 1.4)),
+  as.character(sum(final_stats$itemfit$Infit  < 0.6)),
+  as.character(items_dropped)
+)
+
+summary_df <- data.frame(
+  Diagnostic    = diag_col,
+  Initial       = init_col,
+  Iteration_1   = iter1_col,
+  Best_Solution = best_col
+)
+
+kable(summary_df,
+      caption   = "Table 12. Rasch Diagnostic Summary: Optimization Across Iterations",
+      col.names = c("Diagnostic", "Initial Model", "Iteration 1", "Best Solution")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = TRUE, font_size = 12) %>%
+  row_spec(0, bold = TRUE, background = "#2C3E50", color = "white")
+```
+
+The optimization was conducted in two iterations. In **Iteration 1**, response category 6 was collapsed into category 5 due to near-zero endorsement (one respondent per item), violating the minimum category observation threshold. This resolved the category malfunction and partially improved item fit. In **Iteration 2**, profes10 was removed as it demonstrated persistent severe misfit $(Outfit\ MnSq = 1.90)$ attributable to its reverse-coded nature. Following these adjustments, no items showed $Outfit\ MnSq > 1.4$. One item **(profes02)** showed persistent overfit $(Infit\ MnSq = 0.69)$, which was retained on the grounds that overfit reflects redundancy rather than measurement distortion. **profes08** showed borderline ZSt values across all three iterations but its MnSq remained within acceptable bounds throughout and was therefore retained. Person Separation Reliability (WLE) decreased from `r round(person_ability$WLE.rel[[1]], 3)` in the initial model to `r round(final_person_ability$WLE.rel[[1]], 3)` in the final model — a modest reduction attributable to item removal and reduced scale length, but remaining comfortably above the 0.80 benchmark. Thresholds were ordered, all categories achieved sufficient observation counts, and reliability was maintained throughout.
+
+
+# Conclusions and Recommendations
+
+```{r final-wright-map, fig.height=8, results='hide'}
+IRT.WrightMap(final_fit,
+              show.thr.lab = TRUE,
+              main         = "Figure 6. Final Item-Person Map (Optimized Scale)")
+```
+
+```{r final-curves, fig.height=8, results='hide'}
+plot(final_fit,
+     type   = "items",
+     export = FALSE)
+```
+
+```{r final-summary, results='hide'}
+cat("=== FINAL SCALE SUMMARY ===\n")
+cat("Items retained:         ", ncol(final_df), "\n")
+cat("Response categories:    ", length(unique(unlist(final_df))), "\n")
+cat("EAP Person Reliability: ", round(final_fit$EAP.rel, 3), "\n")
+cat("Cronbach's Alpha:       ", round(final_rel$total$raw_alpha, 3), "\n")
+cat("Outfit MnSq > 1.4:     ", sum(final_stats$itemfit$Outfit > 1.4), "\n")
+cat("Infit MnSq > 1.4:      ", sum(final_stats$itemfit$Infit  > 1.4), "\n")
+cat("Items dropped:          ", items_dropped, "\n")
+```
+
+This study conducted a comprehensive Rasch Rating Scale Model analysis (Andrich, 1978) of the Passion for Profession scale on a sample of `r nrow(items_clean)` undergraduate students. The original 10-item, 6-point scale required targeted optimization to satisfy Rasch model requirements.
+
+**Summary of findings.** The initial model demonstrated good reliability (alpha = `r round(rel$total$raw_alpha, 3)`, EAP = `r round(fit_RSM$EAP.rel, 3)`) and approximate unidimensionality (first contrast eigenvalue = `r round(pca_res$values[1], 3)`). However, two structural problems were identified: near-zero use of category 6 (*Strongly Agree*) across all items, and severe misfit of profes10 due to its reverse-coded nature. These were addressed in two optimization iterations.
+
+## Final Optimized Scale
+
+The final scale comprises `r ncol(final_df)` items on a 5-point response format, with EAP Reliability = `r round(final_fit$EAP.rel, 3)` and Cronbach's alpha = `r round(final_rel$total$raw_alpha, 3)`. No items show *Outfit MnSq* > 1.4. One item (profes02) shows residual overfit (Infit MnSq = `r round(fit_df3$Infit_MnSq[fit_df3$Item == "profes02"], 3)`), retained as overfit reflects redundancy rather than measurement distortion. Unidimensionality is confirmed in the final model (first contrast eigenvalue = `r round(pca_res3$values[1], 3)`, below the 2.0 threshold). Thresholds are ordered and all categories achieve sufficient frequencies. The final Wright Map confirms adequate targeting of item difficulties to the person ability range of this undergraduate sample.
+
+## Recommendation
+
+The optimized `r ncol(final_df)`-item, 5-point Passion for Profession scale is **recommended for use** in research with undergraduate student populations, subject to the following conditions:
+
+1. Response category labels should be updated to reflect the 5-point format (e.g., *Strongly Disagree* to *Strongly Agree* across five levels).
+
+2. The removed item profes10 should be revised ideally replaced with an additional positively worded item targeting the lower end of the passion continuum, as the Wright Map suggests some underrepresentation at lower difficulty levels.
+
+3. The overfitting item profes02 ("What attracts me to my profession is the opportunity to learn something new.") may be considered for replacement in future scale revisions, as it contributes information that is largely redundant with adjacent items.
+
+4. Cross-validation with an independent sample is recommended before high-stakes use.
+
+5. The marginal unidimensionality finding (initial eigenvalue = `r round(pca_res$values[1], 3)`; final model eigenvalue = `r round(pca_res3$values[1], 3)`) warrants further investigation — future research should explore whether the scale captures distinct facets of passion (e.g., intrinsic interest vs. professional identity) that could be better modelled with a multidimensional approach.
+
+## Limitations
+
+The sample is restricted to first and second year students at a single institution, limiting generalizability. The near-ceiling distributions across most items suggest limited sensitivity for differentiating among high-passion individuals — a broader item pool targeting lower difficulty levels would improve measurement precision for this population.
+
+
+## Reflections & Contributions
+The analysis evaluated a 10-item scale designed to measure professional passion. The results revealed several critical insights into the scale's psychometric performance:
+
+**Initial Reliability:** The scale started with high internal consistency, showing a Cronbach’s Alpha of 0.93 and an EAP Person Reliability of 0.92, both well above the 0.80 benchmark for "good" reliability.
+
+**Item Performance and Misfit:**
+
+**Item profes10** was identified as a major source of measurement noise, likely due to its reverse-coded nature. It showed severe underfit (Infit MnSq = 1.52), meaning responses were more random than the model predicted. 
+
+**Item profes02** showed persistent overfit (Infit MnSq = 0.65), suggesting it was redundant essentially asking the same thing as other items in a way that didn't add new information.
+
+**Scale Optimization:** To improve the model, the team collapsed the original 6-point scale into a 5-point (0-4) scale. This adjustment ensured that all response categories were properly ordered and that each had enough observations to be statistically meaningful.
+
+**Final Model:** After removing the problematic item (profes10) and adjusting the scale, the Person Separation Reliability settled at 0.87. While lower than the initial 0.91, it remains a robust and more accurate representation of the latent trait.
+
+## Group Contributions 
+
+**Adenigbagbe Abosede Precious-Gold:** Performed the major work for the project, including the entire data description and preparation phase. This involved the reverse-coding of item 10, identifying and removing extreme scorers to establish the final analytic sample (N=244), and ensuring no missing data was present.And also conducted the initial reliability assessments (Cronbach’s alpha, EAP, and WLE) and the dimensionality check via PCA.
+
+**Alexey Zhurbitsky:** Contributed to the project by making minor corrections to the the interpretation text.
+
+# References
+
+Andrich, D. (1978). A rating formulation for ordered response categories. *Psychometrika, 43*(4), 561--573.
+
+Bond, T. G., & Fox, C. M. (2015). *Applying the Rasch model: Fundamental measurement in the human sciences* (3rd ed.). Routledge.
+
+Boone, W. J., & Noltemeyer, A. (2017). Rasch analysis: A primer for school psychology researchers and practitioners. *Cogent Education, 4*(1), 1416898.
+
+Kline, P. (2000). *The handbook of psychological testing* (2nd ed.). Routledge.
+
+Linacre, J. M. (1998). Detecting multidimensionality: Which residual data-type works best? *Journal of Outcome Measurement, 2*(3), 266--283.
+
+Linacre, J. M. (2002). Optimizing rating scale category effectiveness. *Journal of Applied Measurement, 3*(1), 85-106. https://www.rasch.org/memo69.htm
+
+Nunnally, J. C. (1978). *Psychometric theory* (2nd ed.). McGraw-Hill.
+
+Smith, E. V., Wakely, M. B., De Kruif, R. E., & Swartz, C. W. (2003). Optimizing rating scales for self-efficacy (and other) research. *Educational and Psychological Measurement, 63*(3), 369--391.
+
+Wright, B. D., & Linacre, J. M. (1994). Reasonable mean-square fit values. *Rasch Measurement Transactions, 8*(3), 370. https://www.rasch.org/rmt/rmt83b.htm
+
+
+# AI Declaration
+
+All analytical decisions including the choice of optimization steps, the interpretation of Rasch diagnostics, and the final recommendations were made independently. 
